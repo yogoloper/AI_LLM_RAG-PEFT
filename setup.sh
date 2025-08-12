@@ -72,7 +72,7 @@ echo "
 사용 방법:
 1. 가상환경 활성화: source venv/bin/activate
 2. VLLM 서버 시작: bash start_vllm_server.sh
-3. 웹앱 실행: streamlit run webapp.py
+3. 웹앱 실행: bash start_webapp.sh
 
 주의사항:
 - model_tuning.ipynb를 먼저 실행하여 모델을 훈련해주세요
