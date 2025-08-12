@@ -108,7 +108,7 @@ def main():
         return
     
     # 메인 탭들
-    tab1, tab2 = st.tabs(["💬 RAG 채팅", "🔍 기본 추론"])
+    tab1, tab2, tab3 = st.tabs(["💬 RAG 채팅", "📄 PDF 관리", "🔍 기본 추론"])
     
     # RAG 채팅 탭
     with tab1:
@@ -153,14 +153,110 @@ def main():
                         if docs:
                             with st.expander("📄 참고 문서들", expanded=True):
                                 for i, doc in enumerate(docs):
-                                    st.markdown(f"**문서 {i+1}** (유사도: {doc['score']:.3f})")
+                                    metadata = doc['metadata']
+                                    source_type = metadata.get('source_type', 'basic')
+                                    
+                                    if source_type == 'pdf':
+                                        # PDF 문서인 경우
+                                        st.markdown(f"**📄 PDF 문서 {i+1}** (유사도: {doc['score']:.3f})")
+                                        st.markdown(f"*파일명: {metadata.get('filename', 'Unknown')}*")
+                                        st.markdown(f"*업로드: {metadata.get('upload_time', 'Unknown')}*")
+                                    else:
+                                        # 기본 데이터인 경우
+                                        st.markdown(f"**📚 기본 문서 {i+1}** (유사도: {doc['score']:.3f})")
+                                        if 'user_message' in metadata:
+                                            st.markdown(f"*관련 질문: {metadata['user_message']}*")
+                                    
                                     st.text(doc['chunk'][:300] + "...")
                                     st.divider()
                 else:
                     st.warning("질문을 입력해주세요.")
     
-    # 기본 추론 탭
+    # PDF 관리 탭
     with tab2:
+        st.subheader("📄 PDF 문서 관리")
+        
+        if not rag_ok:
+            st.warning("RAG 시스템을 먼저 초기화해주세요.")
+        else:
+            # PDF 업로드 섹션
+            st.markdown("### 📤 PDF 업로드")
+            uploaded_files = st.file_uploader(
+                "PDF 파일을 선택하세요",
+                type=['pdf'],
+                accept_multiple_files=True,
+                help="여러 PDF 파일을 동시에 업로드할 수 있습니다."
+            )
+            
+            if uploaded_files:
+                upload_col1, upload_col2 = st.columns([1, 1])
+                
+                with upload_col1:
+                    if st.button("📤 업로드 시작", type="primary"):
+                        success_count = 0
+                        for uploaded_file in uploaded_files:
+                            with st.spinner(f"'{uploaded_file.name}' 처리 중..."):
+                                # 중복 파일명 체크
+                                existing_files = [doc['filename'] for doc in st.session_state.rag_system.pdf_documents]
+                                if uploaded_file.name in existing_files:
+                                    st.warning(f"⚠️ '{uploaded_file.name}'은 이미 업로드된 파일입니다.")
+                                    continue
+                                
+                                # PDF 추가
+                                if st.session_state.rag_system.add_pdf_document(uploaded_file, uploaded_file.name):
+                                    success_count += 1
+                        
+                        if success_count > 0:
+                            st.success(f"✅ {success_count}개 파일 업로드 완료!")
+                            st.rerun()  # 페이지 새로고침으로 상태 업데이트
+                
+                with upload_col2:
+                    st.info(f"선택된 파일: {len(uploaded_files)}개")
+                    for file in uploaded_files:
+                        st.text(f"• {file.name} ({file.size:,} bytes)")
+            
+            st.divider()
+            
+            # 업로드된 PDF 목록
+            st.markdown("### 📋 업로드된 PDF 목록")
+            pdf_summary = st.session_state.rag_system.get_pdf_summary()
+            
+            if pdf_summary['total_pdfs'] == 0:
+                st.info("업로드된 PDF 문서가 없습니다.")
+            else:
+                # 요약 정보
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("총 PDF 수", pdf_summary['total_pdfs'])
+                with col2:
+                    st.metric("총 청크 수", pdf_summary['total_pdf_chunks'])
+                with col3:
+                    basic_chunks = len(st.session_state.rag_system.chunks) - pdf_summary['total_pdf_chunks']
+                    st.metric("기본 데이터 청크", basic_chunks)
+                
+                st.divider()
+                
+                # PDF 문서 목록
+                for i, doc in enumerate(pdf_summary['documents']):
+                    with st.expander(f"📄 {doc['filename']}", expanded=False):
+                        info_col1, info_col2, action_col = st.columns([2, 2, 1])
+                        
+                        with info_col1:
+                            st.text(f"업로드 시간: {doc['upload_time']}")
+                            st.text(f"청크 수: {doc['chunk_count']}개")
+                        
+                        with info_col2:
+                            st.text(f"텍스트 길이: {len(doc['text']):,}자")
+                            st.text(f"텍스트 미리보기:")
+                            st.text(doc['text'][:200] + "..." if len(doc['text']) > 200 else doc['text'])
+                        
+                        with action_col:
+                            if st.button("🗑️ 삭제", key=f"delete_{i}"):
+                                if st.session_state.rag_system.remove_pdf_document(doc['filename']):
+                                    st.rerun()
+    
+    # 기본 추론 탭
+    with tab3:
         st.subheader("💭 기본 추론")
         st.caption("RAG 없이 모델만 사용")
         

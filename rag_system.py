@@ -1,5 +1,5 @@
 """
-간소화된 RAG 시스템
+간소화된 RAG 시스템 - PDF 업로드 지원
 """
 
 import streamlit as st
@@ -11,6 +11,11 @@ import numpy as np
 from datasets import load_dataset
 from typing import List, Dict, Tuple
 from api_client import VLLMAPIClient
+import PyPDF2
+import pdfplumber
+import io
+import os
+from datetime import datetime
 
 class SimpleRAGSystem:
     """간소화된 RAG 시스템"""
@@ -24,6 +29,11 @@ class SimpleRAGSystem:
         self.tfidf_vectorizer = None
         self.tfidf_matrix = None
         self.initialized = False
+        
+        # PDF 관련 상태
+        self.pdf_documents = []  # 업로드된 PDF 문서들
+        self.pdf_chunks = []     # PDF에서 추출한 청크들
+        self.pdf_metadata = []   # PDF 청크 메타데이터
     
     @st.cache_resource
     def load_embedding_model(_self):
@@ -264,3 +274,183 @@ class SimpleRAGSystem:
         answer = self.api_client.simple_chat(prompt)
         
         return answer, source_docs
+    
+    def extract_text_from_pdf(self, pdf_file) -> str:
+        """PDF에서 텍스트 추출"""
+        try:
+            # pdfplumber를 우선 사용 (더 정확한 텍스트 추출)
+            with pdfplumber.open(pdf_file) as pdf:
+                text = ""
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+                
+                if text.strip():
+                    return text
+            
+            # pdfplumber 실패시 PyPDF2 사용
+            pdf_file.seek(0)  # 파일 포인터 리셋
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+            
+            return text
+            
+        except Exception as e:
+            st.error(f"PDF 텍스트 추출 실패: {str(e)}")
+            return ""
+    
+    def add_pdf_document(self, pdf_file, filename: str) -> bool:
+        """PDF 문서를 RAG 시스템에 추가"""
+        try:
+            # PDF 텍스트 추출
+            pdf_text = self.extract_text_from_pdf(pdf_file)
+            
+            if not pdf_text.strip():
+                st.error("PDF에서 텍스트를 추출할 수 없습니다.")
+                return False
+            
+            # PDF 문서 정보 저장
+            pdf_doc = {
+                'filename': filename,
+                'upload_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'text': pdf_text,
+                'chunk_count': 0
+            }
+            
+            # PDF 텍스트를 청킹
+            pdf_chunks = self._chunk_pdf_text(pdf_text, filename)
+            
+            if not pdf_chunks:
+                st.error("PDF 텍스트 청킹에 실패했습니다.")
+                return False
+            
+            pdf_doc['chunk_count'] = len(pdf_chunks)
+            self.pdf_documents.append(pdf_doc)
+            
+            # 기존 청크와 통합
+            self.chunks.extend([chunk['text'] for chunk in pdf_chunks])
+            self.chunk_metadata.extend([chunk['metadata'] for chunk in pdf_chunks])
+            
+            # 벡터 인덱스 재구축
+            self._rebuild_indices()
+            
+            st.success(f"✅ PDF '{filename}' 추가 완료! ({len(pdf_chunks)}개 청크)")
+            return True
+            
+        except Exception as e:
+            st.error(f"PDF 문서 추가 실패: {str(e)}")
+            return False
+    
+    def _chunk_pdf_text(self, text: str, filename: str) -> List[Dict]:
+        """PDF 텍스트를 청크로 분할"""
+        chunk_size = 500  # PDF는 좀 더 큰 청크 사용
+        overlap = 50      # 청크 간 오버랩
+        
+        chunks = []
+        sentences = text.split('. ')
+        
+        current_chunk = ""
+        for i, sentence in enumerate(sentences):
+            if len(current_chunk + sentence) < chunk_size:
+                current_chunk += sentence + ". "
+            else:
+                if current_chunk.strip():
+                    chunks.append({
+                        'text': current_chunk.strip(),
+                        'metadata': {
+                            'source_type': 'pdf',
+                            'filename': filename,
+                            'chunk_index': len(chunks),
+                            'upload_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                    })
+                
+                # 오버랩을 위해 이전 청크의 마지막 부분 포함
+                if overlap > 0 and len(sentences) > i + 1:
+                    overlap_start = max(0, i - overlap//10)  # 대략적인 오버랩
+                    current_chunk = '. '.join(sentences[overlap_start:i+1]) + ". "
+                else:
+                    current_chunk = sentence + ". "
+        
+        # 마지막 청크 추가
+        if current_chunk.strip():
+            chunks.append({
+                'text': current_chunk.strip(),
+                'metadata': {
+                    'source_type': 'pdf',
+                    'filename': filename,
+                    'chunk_index': len(chunks),
+                    'upload_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+            })
+        
+        return chunks
+    
+    def _rebuild_indices(self):
+        """벡터 및 TF-IDF 인덱스 재구축"""
+        if not self.chunks or not self.embedder:
+            return
+        
+        # 벡터 인덱스 재구축
+        print("🔄 벡터 인덱스 재구축 중...")
+        embeddings = self.embedder.encode(self.chunks)
+        dimension = embeddings.shape[1]
+        self.vector_index = faiss.IndexFlatL2(dimension)
+        self.vector_index.add(embeddings.astype('float32'))
+        
+        # TF-IDF 인덱스 재구축
+        print("🔄 TF-IDF 인덱스 재구축 중...")
+        self.tfidf_vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
+        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(self.chunks)
+        
+        print(f"✅ 인덱스 재구축 완료! (총 {len(self.chunks)}개 청크)")
+    
+    def get_pdf_summary(self) -> Dict:
+        """업로드된 PDF 문서 요약 정보"""
+        return {
+            'total_pdfs': len(self.pdf_documents),
+            'total_pdf_chunks': sum([doc['chunk_count'] for doc in self.pdf_documents]),
+            'documents': self.pdf_documents
+        }
+    
+    def remove_pdf_document(self, filename: str) -> bool:
+        """특정 PDF 문서 제거"""
+        try:
+            # PDF 문서 찾기
+            pdf_to_remove = None
+            for doc in self.pdf_documents:
+                if doc['filename'] == filename:
+                    pdf_to_remove = doc
+                    break
+            
+            if not pdf_to_remove:
+                st.warning(f"PDF '{filename}'을 찾을 수 없습니다.")
+                return False
+            
+            # 해당 PDF의 청크들 제거
+            new_chunks = []
+            new_metadata = []
+            
+            for chunk, metadata in zip(self.chunks, self.chunk_metadata):
+                if metadata.get('source_type') != 'pdf' or metadata.get('filename') != filename:
+                    new_chunks.append(chunk)
+                    new_metadata.append(metadata)
+            
+            self.chunks = new_chunks
+            self.chunk_metadata = new_metadata
+            
+            # PDF 문서 목록에서 제거
+            self.pdf_documents = [doc for doc in self.pdf_documents if doc['filename'] != filename]
+            
+            # 인덱스 재구축
+            self._rebuild_indices()
+            
+            st.success(f"✅ PDF '{filename}' 제거 완료!")
+            return True
+            
+        except Exception as e:
+            st.error(f"PDF 문서 제거 실패: {str(e)}")
+            return False
